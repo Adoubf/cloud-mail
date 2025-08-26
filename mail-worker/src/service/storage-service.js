@@ -105,56 +105,101 @@ class MinIOClient {
     // 使用原生HTTP PUT上传文件
     async putObject(key, content, contentType = 'application/octet-stream') {
         const url = `${this.endpoint}/${this.bucketName}/${key}`;
-        const path = `/${this.bucketName}/${key}`;
         
         console.log(`MinIO直接HTTP上传: ${url}`);
         console.log(`内容大小: ${content.byteLength || content.length} bytes`);
+        console.log(`MinIO配置: endpoint=${this.endpoint}, bucket=${this.bucketName}, accessKey=${this.accessKey}`);
         
-        // 准备头信息
+        // 先尝试最简单的方式 - 无认证上传（如果MinIO配置为公开访问）
+        try {
+            console.log('尝试无认证上传...');
+            const response = await fetch(url, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': (content.byteLength || content.length).toString()
+                },
+                body: content
+            });
+
+            console.log(`MinIO HTTP响应状态 (无认证): ${response.status}`);
+            
+            if (response.ok || response.status === 200) {
+                const etag = response.headers.get('ETag') || response.headers.get('etag');
+                console.log(`MinIO HTTP上传成功 (无认证): ${key}, ETag: ${etag}`);
+                return { ETag: etag, success: true, status: response.status };
+            } else {
+                const errorText = await response.text().catch(() => 'No response text');
+                console.log(`无认证上传失败: ${response.status} - ${errorText}`);
+            }
+            
+        } catch (error) {
+            console.log('无认证上传出错:', error.message);
+        }
+        
+        // 尝试Basic认证
+        try {
+            console.log('尝试Basic认证上传...');
+            const auth = btoa(`${this.accessKey}:${this.secretKey}`);
+            const response = await fetch(url, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Basic ${auth}`,
+                    'Content-Type': contentType,
+                    'Content-Length': (content.byteLength || content.length).toString()
+                },
+                body: content
+            });
+
+            console.log(`MinIO HTTP响应状态 (Basic): ${response.status}`);
+            
+            if (response.ok || response.status === 200) {
+                const etag = response.headers.get('ETag') || response.headers.get('etag');
+                console.log(`MinIO HTTP上传成功 (Basic): ${key}, ETag: ${etag}`);
+                return { ETag: etag, success: true, status: response.status };
+            } else {
+                const errorText = await response.text().catch(() => 'No response text');
+                console.log(`Basic认证上传失败: ${response.status} - ${errorText}`);
+            }
+            
+        } catch (error) {
+            console.log('Basic认证上传出错:', error.message);
+        }
+        
+        // 如果上面都失败，尝试AWS4签名
+        console.log('尝试AWS4签名认证...');
+        const path = `/${this.bucketName}/${key}`;
         const headers = {
             'Content-Type': contentType,
             'Content-Length': (content.byteLength || content.length).toString(),
-            'Host': url.split('/')[2] // 从 URL 中提取 host
-        };
-        
-        // 生成AWS4签名
-        const authHeaders = await this.createAWSSignature('PUT', path, headers, content);
-        
-        // 合并头信息
-        const finalHeaders = {
-            ...headers,
-            ...authHeaders,
-            'Cache-Control': 'no-cache'
+            'Host': url.replace(/^https?:\/\//, '').split('/')[0]
         };
         
         try {
+            const authHeaders = await this.createAWSSignature('PUT', path, headers, content);
+            const finalHeaders = { ...headers, ...authHeaders };
+            
+            console.log('AWS4签名头信息:', finalHeaders);
+            
             const response = await fetch(url, {
                 method: 'PUT',
                 headers: finalHeaders,
                 body: content
             });
 
-            console.log(`MinIO HTTP响应状态: ${response.status}`);
-            console.log(`响应头:`, Object.fromEntries(response.headers.entries()));
+            console.log(`MinIO HTTP响应状态 (AWS4): ${response.status}`);
             
             if (response.ok || response.status === 200) {
                 const etag = response.headers.get('ETag') || response.headers.get('etag');
-                console.log(`MinIO HTTP上传成功: ${key}, ETag: ${etag}`);
+                console.log(`MinIO HTTP上传成功 (AWS4): ${key}, ETag: ${etag}`);
                 return { ETag: etag, success: true, status: response.status };
             } else {
                 const errorText = await response.text().catch(() => 'No response text');
-                console.error(`MinIO HTTP上传失败: ${response.status} - ${errorText}`);
-                
-                // 即使返回错误状态码，也检查是否实际上传成功
-                if (response.status >= 200 && response.status < 300) {
-                    console.log('状态码显示成功，忽略错误文本');
-                    return { ETag: 'http-success', success: true, status: response.status };
-                }
-                
-                throw new Error(`HTTP ${response.status}: ${errorText}`);
+                console.error(`MinIO HTTP上传失败 (AWS4): ${response.status} - ${errorText}`);
+                throw new Error(`HTTP ${response.status}: error code: ${response.status}`);
             }
         } catch (error) {
-            console.error(`MinIO HTTP请求失败:`, error);
+            console.error(`MinIO HTTP请求失败 (AWS4):`, error);
             throw error;
         }
     }
