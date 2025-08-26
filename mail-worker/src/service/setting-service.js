@@ -21,7 +21,34 @@ const settingService = {
 	},
 
 	async query(c) {
-		const setting = await c.env.kv.get(KvConst.SETTING, { type: 'json' });
+		let settingData = await c.env.kv.get(KvConst.SETTING, { type: 'json' });
+		
+		// 如果 KV 中没有数据，先从数据库中获取
+		if (!settingData) {
+			try {
+				const settingRow = await orm(c).select().from(setting).get();
+				if (settingRow) {
+					settingRow.resendTokens = JSON.parse(settingRow.resendTokens || '{}');
+					await c.env.kv.put(KvConst.SETTING, JSON.stringify(settingRow));
+					settingData = settingRow;
+				}
+			} catch (error) {
+				console.warn('数据库可能尚未初始化:', error.message);
+				// 返回默认配置
+				settingData = {
+					register: 0,
+					receive: 0,
+					title: 'Cloud Mail',
+					manyEmail: 1,
+					addEmail: 0,
+					autoRefreshTime: 0,
+					addEmailVerify: 1,
+					registerVerify: 1,
+					resendTokens: {}
+				};
+			}
+		}
+		
 		let domainList = c.env.domain;
 		if (typeof domainList === 'string') {
 			try {
@@ -31,8 +58,8 @@ const settingService = {
 			}
 		}
 		domainList = domainList.map(item => '@' + item);
-		setting.domainList = domainList;
-		return setting;
+		settingData.domainList = domainList;
+		return settingData;
 	},
 
 	async get(c) {
@@ -127,6 +154,17 @@ const settingService = {
 
 		const settingRow = await this.get(c)
 
+		// 获取存储域名信息
+		const storageType = c.env.STORAGE_TYPE || 'r2';
+		let storageDomain = settingRow.r2Domain; // 默认使用 R2 域名
+		
+		if (storageType === 'minio') {
+			// 如果使用 MinIO，使用 MinIO 的访问域名
+			const endpoint = c.env.MINIO_ENDPOINT;
+			const bucket = c.env.MINIO_BUCKET_NAME;
+			storageDomain = endpoint && bucket ? `${endpoint}/${bucket}` : null;
+		}
+
 		return {
 			register: settingRow.register,
 			title: settingRow.title,
@@ -137,6 +175,8 @@ const settingService = {
 			registerVerify: settingRow.registerVerify,
 			send: settingRow.send,
 			r2Domain: settingRow.r2Domain,
+			storageDomain: storageDomain, // 新增：存储域名
+			storageType: storageType, // 新增：存储类型
 			siteKey: settingRow.siteKey,
 			background: settingRow.background,
 			loginOpacity: settingRow.loginOpacity,

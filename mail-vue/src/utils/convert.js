@@ -11,7 +11,12 @@ export function cvtR2Url(key) {
 
     const { settings } = useSettingStore();
 
-    let domain = settings.r2Domain
+    // 优先使用 storageDomain（支持 MinIO），否则使用 r2Domain
+    let domain = settings.storageDomain || settings.r2Domain;
+
+    if (!domain) {
+        return 'https://' + ''
+    }
 
     if (!domain.startsWith('http')) {
         return 'https://' + domain + '/' + key

@@ -1,16 +1,21 @@
+import storageService from './storage-service.js';
+
 const r2Service = {
 	async putObj(c, key, content, metadata) {
-		await c.env.r2.put(key, content, {
-			httpMetadata: {...metadata}
-		});
+		return await storageService.putObj(c, key, content, metadata);
 	},
 
 	async getObj(c, key) {
-		return await c.env.r2.get(key);
+		return await storageService.getObj(c, key);
 	},
 
 	async delete(c, key) {
-		await c.env.r2.delete(key);
+		return await storageService.delete(c, key);
+	},
+
+	// 新增：获取文件访问 URL
+	getFileUrl(c, key) {
+		return storageService.getFileUrl(c, key);
 	}
 
 };
