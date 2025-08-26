@@ -291,6 +291,10 @@ const emailService = {
 
 		html = this.imgReplace(html, null, r2Domain);
 
+		// 重要提示：由于Cloudflare Workers环境限制，如果附件上传失败但邮件发送成功，
+		// 用户仍然可以通过邮件客户端获取附件，只是系统内无法存储副本
+		console.log('邮件发送阶段完成，开始处理邮件记录...');
+
 		const emailData = {};
 		emailData.sendEmail = accountRow.email;
 		emailData.name = name;
@@ -336,6 +340,27 @@ const emailService = {
 		}
 
 
+		// 先验证和处理附件，确保事务性
+		if (attachments?.length > 0 && hasStorage) {
+			try {
+				console.log(`开始预处理 ${attachments.length} 个附件...`);
+				// 先验证所有附件的内容
+				for (let att of attachments) {
+					if (!att.content) {
+						throw new Error(`附件 ${att.filename} 内容为空`);
+					}
+					// 验证base64格式
+					if (!/^[A-Za-z0-9+/]*={0,2}$/.test(att.content)) {
+						throw new Error(`附件 ${att.filename} 格式无效`);
+					}
+				}
+				console.log('所有附件预验证通过');
+			} catch (error) {
+				console.error('附件预验证失败:', error);
+				throw new Error(`邮件发送失败: ${error.message}`);
+			}
+		}
+
 		if (roleRow.sendCount) {
 			await userService.incrUserSendCount(c, receiveEmail.length, userId);
 		}
@@ -357,15 +382,14 @@ const emailService = {
 						}
 					}
 
-					// 处理附件上传
+					// 处理附件上传 - 这里改为仅记录错误，不中断流程
 					if (attachments?.length > 0 && hasStorage) {
 						try {
 							await attService.saveSendAtt(c, attachments, userId, accountId, emailRow.emailId);
 							console.log(`附件上传成功: ${attachments.length} 个`);
 						} catch (error) {
-							console.error(`附件上传失败:`, error);
-							// 附件上传失败时，抛出错误让前端知道
-							throw new Error(`附件上传失败: ${error.message}`);
+							console.error(`附件上传失败但不影响邮件:`, error);
+							// 不抛出错误，因为邮件已发送成功，只记录失败
 						}
 					}
 

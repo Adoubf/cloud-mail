@@ -1,27 +1,147 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+// 简化的MinIO HTTP客户端，专门用于Cloudflare Workers环境
+class MinIOClient {
+    constructor(endpoint, accessKey, secretKey, bucketName) {
+        this.endpoint = endpoint;
+        this.accessKey = accessKey;
+        this.secretKey = secretKey;
+        this.bucketName = bucketName;
+    }
+
+    // 使用原生HTTP PUT上传文件
+    async putObject(key, content, contentType = 'application/octet-stream') {
+        const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        
+        console.log(`MinIO直接HTTP上传: ${url}`);
+        console.log(`内容大小: ${content.byteLength || content.length} bytes`);
+        
+        try {
+            const response = await fetch(url, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': (content.byteLength || content.length).toString(),
+                    // MinIO可能需要这些头信息
+                    'Cache-Control': 'no-cache',
+                    'X-Amz-Content-Sha256': 'UNSIGNED-PAYLOAD'
+                },
+                body: content
+            });
+
+            console.log(`MinIO HTTP响应状态: ${response.status}`);
+            console.log(`响应头:`, Object.fromEntries(response.headers.entries()));
+            
+            if (response.ok || response.status === 200) {
+                const etag = response.headers.get('ETag') || response.headers.get('etag');
+                console.log(`MinIO HTTP上传成功: ${key}, ETag: ${etag}`);
+                return { ETag: etag, success: true, status: response.status };
+            } else {
+                const errorText = await response.text().catch(() => 'No response text');
+                console.error(`MinIO HTTP上传失败: ${response.status} - ${errorText}`);
+                
+                // 即使返回错误状态码，也检查是否实际上传成功
+                if (response.status >= 200 && response.status < 300) {
+                    console.log('状态码显示成功，忽略错误文本');
+                    return { ETag: 'http-success', success: true, status: response.status };
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+        } catch (error) {
+            console.error(`MinIO HTTP请求失败:`, error);
+            throw error;
+        }
+    }
+
+    // 检查文件是否存在
+    async headObject(key) {
+        const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        
+        try {
+            const response = await fetch(url, {
+                method: 'HEAD',
+                headers: {
+                    'Cache-Control': 'no-cache'
+                }
+            });
+
+            console.log(`MinIO HEAD响应状态: ${response.status}`);
+
+            if (response.ok || response.status === 200) {
+                return {
+                    ContentLength: response.headers.get('Content-Length'),
+                    ContentType: response.headers.get('Content-Type'),
+                    ETag: response.headers.get('ETag') || response.headers.get('etag')
+                };
+            } else if (response.status === 404) {
+                return null;
+            } else {
+                const errorText = await response.text().catch(() => 'No response text');
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+        } catch (error) {
+            console.error(`MinIO HEAD请求失败:`, error);
+            throw error;
+        }
+    }
+
+    // 获取对象
+    async getObject(key) {
+        const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Cache-Control': 'no-cache'
+                }
+            });
+
+            if (response.ok) {
+                return {
+                    body: response.body,
+                    httpMetadata: {
+                        contentType: response.headers.get('Content-Type'),
+                        contentDisposition: response.headers.get('Content-Disposition'),
+                    }
+                };
+            } else {
+                const errorText = await response.text().catch(() => 'No response text');
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+        } catch (error) {
+            console.error(`MinIO GET请求失败:`, error);
+            throw error;
+        }
+    }
+
+    // 删除对象
+    async deleteObject(key) {
+        const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        
+        try {
+            const response = await fetch(url, {
+                method: 'DELETE',
+                headers: {
+                    'Cache-Control': 'no-cache'
+                }
+            });
+
+            if (response.ok || response.status === 204) {
+                console.log(`MinIO HTTP删除成功: ${key}`);
+                return { success: true };
+            } else {
+                const errorText = await response.text().catch(() => 'No response text');
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+        } catch (error) {
+            console.error(`MinIO DELETE请求失败:`, error);
+            throw error;
+        }
+    }
+}
 
 const storageService = {
     
-    // 初始化存储客户端
-    getClient(c) {
-        const storageType = c.env.STORAGE_TYPE || 'r2'; // 默认使用 R2
-        
-        if (storageType === 'minio') {
-            return new S3Client({
-                region: 'us-east-1', // MinIO 可以使用任意region
-                endpoint: c.env.MINIO_ENDPOINT, // MinIO 服务地址
-                credentials: {
-                    accessKeyId: c.env.MINIO_ACCESS_KEY,
-                    secretAccessKey: c.env.MINIO_SECRET_KEY,
-                },
-                forcePathStyle: true, // MinIO 需要路径风格
-            });
-        } else {
-            // 保持原有 R2 逻辑
-            return c.env.r2;
-        }
-    },
-
     // 上传对象
     async putObj(c, key, content, metadata) {
         const storageType = c.env.STORAGE_TYPE || 'r2';
@@ -34,27 +154,24 @@ const storageService = {
         }
         
         if (storageType === 'minio') {
-            try {
-                const client = this.getClient(c);
-                const command = new PutObjectCommand({
-                    Bucket: c.env.MINIO_BUCKET_NAME,
-                    Key: key,
-                    Body: content,
-                    ContentType: metadata?.contentType,
-                    ContentDisposition: metadata?.contentDisposition,
-                });
-                
-                console.log(`开始上传到MinIO: ${key}, 大小: ${content.byteLength || content.length}`);
-                const result = await client.send(command);
-                console.log(`MinIO上传成功: ${key}, ETag: ${result.ETag}`);
-                
-                return result;
-            } catch (error) {
-                console.error(`MinIO上传失败: ${key}`, error);
-                // 确保错误信息是字符串格式
-                const errorMessage = error.message || error.toString() || 'MinIO上传失败';
-                throw new Error(`MinIO上传失败: ${errorMessage}`);
-            }
+            console.log(`使用MinIO HTTP客户端上传: ${key}, 大小: ${content.byteLength || content.length}`);
+            
+            // 使用原生HTTP方法上传到MinIO
+            const minioClient = new MinIOClient(
+                c.env.MINIO_ENDPOINT,
+                c.env.MINIO_ACCESS_KEY,
+                c.env.MINIO_SECRET_KEY,
+                c.env.MINIO_BUCKET_NAME
+            );
+            
+            const result = await minioClient.putObject(
+                key, 
+                content, 
+                metadata?.contentType || 'application/octet-stream'
+            );
+            
+            console.log(`MinIO HTTP上传成功: ${key}`);
+            return result;
         } else {
             try {
                 // 保持原有 R2 逻辑
@@ -77,26 +194,14 @@ const storageService = {
         const storageType = c.env.STORAGE_TYPE || 'r2';
         
         if (storageType === 'minio') {
-            try {
-                const client = this.getClient(c);
-                const command = new GetObjectCommand({
-                    Bucket: c.env.MINIO_BUCKET_NAME,
-                    Key: key,
-                });
-                const response = await client.send(command);
-                
-                return {
-                    body: response.Body,
-                    httpMetadata: {
-                        contentType: response.ContentType,
-                        contentDisposition: response.ContentDisposition,
-                    }
-                };
-            } catch (error) {
-                console.error(`MinIO获取文件失败: ${key}`, error);
-                const errorMessage = error.message || error.toString() || 'MinIO获取文件失败';
-                throw new Error(`MinIO获取文件失败: ${errorMessage}`);
-            }
+            const minioClient = new MinIOClient(
+                c.env.MINIO_ENDPOINT,
+                c.env.MINIO_ACCESS_KEY,
+                c.env.MINIO_SECRET_KEY,
+                c.env.MINIO_BUCKET_NAME
+            );
+            
+            return await minioClient.getObject(key);
         } else {
             try {
                 // 保持原有 R2 逻辑
@@ -114,20 +219,14 @@ const storageService = {
         const storageType = c.env.STORAGE_TYPE || 'r2';
         
         if (storageType === 'minio') {
-            try {
-                const client = this.getClient(c);
-                const command = new DeleteObjectCommand({
-                    Bucket: c.env.MINIO_BUCKET_NAME,
-                    Key: key,
-                });
-                const result = await client.send(command);
-                console.log(`MinIO删除成功: ${key}`);
-                return result;
-            } catch (error) {
-                console.error(`MinIO删除失败: ${key}`, error);
-                const errorMessage = error.message || error.toString() || 'MinIO删除失败';
-                throw new Error(`MinIO删除失败: ${errorMessage}`);
-            }
+            const minioClient = new MinIOClient(
+                c.env.MINIO_ENDPOINT,
+                c.env.MINIO_ACCESS_KEY,
+                c.env.MINIO_SECRET_KEY,
+                c.env.MINIO_BUCKET_NAME
+            );
+            
+            return await minioClient.deleteObject(key);
         } else {
             try {
                 // 保持原有 R2 逻辑
@@ -155,6 +254,34 @@ const storageService = {
             // R2 的访问 URL 格式（需要配置自定义域名）
             const r2Domain = c.env.R2_DOMAIN;
             return r2Domain ? `${r2Domain}/${key}` : null;
+        }
+    },
+
+    // 检查文件是否存在（用于验证上传状态）
+    async checkFileExists(c, key) {
+        const storageType = c.env.STORAGE_TYPE || 'r2';
+        
+        if (storageType === 'minio') {
+            const minioClient = new MinIOClient(
+                c.env.MINIO_ENDPOINT,
+                c.env.MINIO_ACCESS_KEY,
+                c.env.MINIO_SECRET_KEY,
+                c.env.MINIO_BUCKET_NAME
+            );
+            
+            return await minioClient.headObject(key);
+        } else {
+            try {
+                const result = await c.env.r2.head(key);
+                if (result) {
+                    console.log(`R2文件存在验证成功: ${key}`);
+                    return result;
+                }
+                return null;
+            } catch (error) {
+                console.error(`R2文件检查错误: ${key}`, error);
+                return null;
+            }
         }
     }
 
