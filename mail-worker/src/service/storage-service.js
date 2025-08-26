@@ -7,23 +7,130 @@ class MinIOClient {
         this.bucketName = bucketName;
     }
 
+    // 生成AWS4签名
+    async createAWSSignature(method, path, headers, body = '') {
+        // 在Cloudflare Workers中使用crypto
+        const service = 's3';
+        const region = 'us-east-1'; // MinIO默认区域
+        const algorithm = 'AWS4-HMAC-SHA256';
+        const date = new Date();
+        const dateStamp = date.toISOString().slice(0, 10).replace(/-/g, '');
+        const amzDate = date.toISOString().slice(0, -5).replace(/[:-]/g, '') + 'Z';
+        
+        // 标准化头信息
+        const canonicalHeaders = Object.keys(headers)
+            .map(key => `${key.toLowerCase()}:${headers[key]}\n`)
+            .sort()
+            .join('');
+            
+        const signedHeaders = Object.keys(headers)
+            .map(key => key.toLowerCase())
+            .sort()
+            .join(';');
+        
+        // 计算payload hash
+        const encoder = new TextEncoder();
+        const data = typeof body === 'string' ? encoder.encode(body) : body;
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const payloadHash = Array.from(new Uint8Array(hashBuffer))
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+        
+        // 构建标准请求
+        const canonicalRequest = [
+            method,
+            path,
+            '', // query string
+            canonicalHeaders,
+            signedHeaders,
+            payloadHash
+        ].join('\n');
+        
+        // 创建签名字符串
+        const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+        const requestHashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(canonicalRequest));
+        const requestHash = Array.from(new Uint8Array(requestHashBuffer))
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+            
+        const stringToSign = [
+            algorithm,
+            amzDate,
+            credentialScope,
+            requestHash
+        ].join('\n');
+        
+        // 计算签名
+        const getSignatureKey = async (key, dateStamp, regionName, serviceName) => {
+            const kDate = await this.hmacSha256('AWS4' + key, dateStamp);
+            const kRegion = await this.hmacSha256(kDate, regionName);
+            const kService = await this.hmacSha256(kRegion, serviceName);
+            const kSigning = await this.hmacSha256(kService, 'aws4_request');
+            return kSigning;
+        };
+        
+        const signingKey = await getSignatureKey(this.secretKey, dateStamp, region, service);
+        const signature = await this.hmacSha256(signingKey, stringToSign);
+        const signatureHex = Array.from(new Uint8Array(signature))
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+        
+        // 构建Authorization头
+        const authorization = `${algorithm} Credential=${this.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signatureHex}`;
+        
+        return {
+            'Authorization': authorization,
+            'X-Amz-Date': amzDate,
+            'X-Amz-Content-Sha256': payloadHash
+        };
+    }
+    
+    // HMAC-SHA256辅助函数
+    async hmacSha256(key, data) {
+        const encoder = new TextEncoder();
+        const keyBuffer = typeof key === 'string' ? encoder.encode(key) : key;
+        const dataBuffer = typeof data === 'string' ? encoder.encode(data) : data;
+        
+        const cryptoKey = await crypto.subtle.importKey(
+            'raw',
+            keyBuffer,
+            { name: 'HMAC', hash: 'SHA-256' },
+            false,
+            ['sign']
+        );
+        
+        return await crypto.subtle.sign('HMAC', cryptoKey, dataBuffer);
+    }
+
     // 使用原生HTTP PUT上传文件
     async putObject(key, content, contentType = 'application/octet-stream') {
         const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        const path = `/${this.bucketName}/${key}`;
         
         console.log(`MinIO直接HTTP上传: ${url}`);
         console.log(`内容大小: ${content.byteLength || content.length} bytes`);
         
+        // 准备头信息
+        const headers = {
+            'Content-Type': contentType,
+            'Content-Length': (content.byteLength || content.length).toString(),
+            'Host': url.split('/')[2] // 从 URL 中提取 host
+        };
+        
+        // 生成AWS4签名
+        const authHeaders = await this.createAWSSignature('PUT', path, headers, content);
+        
+        // 合并头信息
+        const finalHeaders = {
+            ...headers,
+            ...authHeaders,
+            'Cache-Control': 'no-cache'
+        };
+        
         try {
             const response = await fetch(url, {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': contentType,
-                    'Content-Length': (content.byteLength || content.length).toString(),
-                    // MinIO可能需要这些头信息
-                    'Cache-Control': 'no-cache',
-                    'X-Amz-Content-Sha256': 'UNSIGNED-PAYLOAD'
-                },
+                headers: finalHeaders,
                 body: content
             });
 
