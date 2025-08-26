@@ -162,13 +162,27 @@ class MinIOClient {
     // 检查文件是否存在
     async headObject(key) {
         const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        const path = `/${this.bucketName}/${key}`;
+        
+        // 准备头信息
+        const headers = {
+            'Host': url.split('/')[2]
+        };
+        
+        // 生成AWS4签名
+        const authHeaders = await this.createAWSSignature('HEAD', path, headers, '');
+        
+        // 合并头信息
+        const finalHeaders = {
+            ...headers,
+            ...authHeaders,
+            'Cache-Control': 'no-cache'
+        };
         
         try {
             const response = await fetch(url, {
                 method: 'HEAD',
-                headers: {
-                    'Cache-Control': 'no-cache'
-                }
+                headers: finalHeaders
             });
 
             console.log(`MinIO HEAD响应状态: ${response.status}`);
@@ -194,13 +208,27 @@ class MinIOClient {
     // 获取对象
     async getObject(key) {
         const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        const path = `/${this.bucketName}/${key}`;
+        
+        // 准备头信息
+        const headers = {
+            'Host': url.split('/')[2]
+        };
+        
+        // 生成AWS4签名
+        const authHeaders = await this.createAWSSignature('GET', path, headers, '');
+        
+        // 合并头信息
+        const finalHeaders = {
+            ...headers,
+            ...authHeaders,
+            'Cache-Control': 'no-cache'
+        };
         
         try {
             const response = await fetch(url, {
                 method: 'GET',
-                headers: {
-                    'Cache-Control': 'no-cache'
-                }
+                headers: finalHeaders
             });
 
             if (response.ok) {
@@ -224,13 +252,27 @@ class MinIOClient {
     // 删除对象
     async deleteObject(key) {
         const url = `${this.endpoint}/${this.bucketName}/${key}`;
+        const path = `/${this.bucketName}/${key}`;
+        
+        // 准备头信息
+        const headers = {
+            'Host': url.split('/')[2]
+        };
+        
+        // 生成AWS4签名
+        const authHeaders = await this.createAWSSignature('DELETE', path, headers, '');
+        
+        // 合并头信息
+        const finalHeaders = {
+            ...headers,
+            ...authHeaders,
+            'Cache-Control': 'no-cache'
+        };
         
         try {
             const response = await fetch(url, {
                 method: 'DELETE',
-                headers: {
-                    'Cache-Control': 'no-cache'
-                }
+                headers: finalHeaders
             });
 
             if (response.ok || response.status === 204) {
