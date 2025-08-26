@@ -342,20 +342,43 @@ const emailService = {
 
 		const emailRowList = await Promise.all(
 			emailDataList.map(async (emailData) => {
-				const emailRow = await orm(c).insert(email).values(emailData).returning().get();
+				try {
+					const emailRow = await orm(c).insert(email).values(emailData).returning().get();
+					console.log(`邮件记录创建成功: ${emailRow.emailId}`);
 
-				if (attDataList.length > 0) {
-					await attService.saveArticleAtt(c, attDataList, userId, accountId, emailRow.emailId);
+					// 处理内嵌图片附件
+					if (attDataList.length > 0) {
+						try {
+							await attService.saveArticleAtt(c, attDataList, userId, accountId, emailRow.emailId);
+							console.log(`内嵌图片处理成功: ${attDataList.length} 个`);
+						} catch (error) {
+							console.error(`内嵌图片处理失败:`, error);
+							// 内嵌图片失败不影响邮件发送，只记录错误
+						}
+					}
+
+					// 处理附件上传
+					if (attachments?.length > 0 && hasStorage) {
+						try {
+							await attService.saveSendAtt(c, attachments, userId, accountId, emailRow.emailId);
+							console.log(`附件上传成功: ${attachments.length} 个`);
+						} catch (error) {
+							console.error(`附件上传失败:`, error);
+							// 附件上传失败时，抛出错误让前端知道
+							throw new Error(`附件上传失败: ${error.message}`);
+						}
+					}
+
+					// 获取最终的附件列表
+					const attsList = await attService.selectByEmailIds(c, [emailRow.emailId]);
+					emailRow.attList = attsList;
+					console.log(`邮件 ${emailRow.emailId} 处理完成，附件数量: ${attsList.length}`);
+
+					return emailRow;
+				} catch (error) {
+					console.error(`邮件处理失败:`, error);
+					throw error;
 				}
-
-				if (attachments?.length > 0 && hasStorage) {
-					await attService.saveSendAtt(c, attachments, userId, accountId, emailRow.emailId);
-				}
-
-				const attsList = await attService.selectByEmailIds(c, [emailRow.emailId]);
-				emailRow.attList = attsList;
-
-				return emailRow;
 			})
 		);
 

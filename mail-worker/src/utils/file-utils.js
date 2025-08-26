@@ -11,13 +11,37 @@ const fileUtils = {
 	},
 
 	base64ToUint8Array(base64) {
-		const binaryStr = atob(base64);
-		const len = binaryStr.length;
-		const bytes = new Uint8Array(len);
-		for (let i = 0; i < len; i++) {
-			bytes[i] = binaryStr.charCodeAt(i);
+		if (!base64) {
+			throw new Error('Base64 字符串为空');
 		}
-		return bytes;
+		
+		// 验证 base64 格式
+		if (!/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+			throw new Error('Base64 字符串格式无效');
+		}
+		
+		try {
+			const binaryStr = atob(base64);
+			const len = binaryStr.length;
+			
+			if (len === 0) {
+				throw new Error('Base64 解码后内容为空');
+			}
+			
+			const bytes = new Uint8Array(len);
+			for (let i = 0; i < len; i++) {
+				bytes[i] = binaryStr.charCodeAt(i);
+			}
+			
+			console.log(`Base64 转换成功，原始长度: ${base64.length}, 输出长度: ${bytes.length}`);
+			return bytes;
+		} catch (error) {
+			console.error('Base64 转换失败:', error);
+			if (error.name === 'InvalidCharacterError') {
+				throw new Error('Base64 字符串包含无效字符');
+			}
+			throw new Error(`Base64 转换失败: ${error.message}`);
+		}
 	},
 
 	/**

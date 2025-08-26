@@ -10,7 +10,7 @@ head_sampling_rate = 1
 [[d1_databases]]
 binding = "db"			#d1数据库绑定名默认不可修改
 database_name = "cloud-mail"		#d1数据库名字
-database_id = "1de3df74-a3c7-426b-837b-aa878f9aa957"		#d1数据库id
+database_id = "608e5ae2-528d-4d87-af73-295f291f8c07"		#d1数据库id
 
 [[kv_namespaces]]
 binding = "kv"			#kv绑定名默认不可修改

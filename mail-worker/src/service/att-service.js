@@ -77,9 +77,40 @@ const attService = {
 
 		const attDataList = [];
 
+		// 验证附件列表
+		if (!attList || attList.length === 0) {
+			console.log('没有附件需要上传');
+			return;
+		}
+
 		for (let att of attList) {
-			att.buff = fileUtils.base64ToUint8Array(att.content);
-			att.key = constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(att.buff) + fileUtils.getExtFileName(att.filename);
+			// 验证附件基本信息
+			if (!att.content) {
+				throw new Error(`附件 ${att.filename} 内容为空`);
+			}
+
+			// 转换 base64 到 Uint8Array
+			try {
+				att.buff = fileUtils.base64ToUint8Array(att.content);
+				console.log(`附件 ${att.filename} 转换成功，大小: ${att.buff.length}`);
+			} catch (error) {
+				console.error(`附件 ${att.filename} base64转换失败:`, error);
+				throw new Error(`附件 ${att.filename} 格式错误，无法解析`);
+			}
+
+			// 验证转换后的内容
+			if (!att.buff || att.buff.length === 0) {
+				throw new Error(`附件 ${att.filename} 转换后内容为空`);
+			}
+
+			// 生成文件key
+			try {
+				att.key = constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(att.buff) + fileUtils.getExtFileName(att.filename);
+			} catch (error) {
+				console.error(`附件 ${att.filename} 生成hash失败:`, error);
+				throw new Error(`附件 ${att.filename} 处理失败`);
+			}
+
 			const attData = { userId, accountId, emailId };
 			attData.key = att.key;
 			attData.size = att.buff.length;
@@ -89,13 +120,33 @@ const attService = {
 			attDataList.push(attData);
 		}
 
-		await orm(c).insert(att).values(attDataList).run();
+		console.log(`开始上传 ${attDataList.length} 个附件到存储`);
 
+		// 先上传文件到存储，再保存数据库记录
 		for (let att of attList) {
-			await r2Service.putObj(c, att.key, att.buff, {
-				contentType: att.type,
-				contentDisposition: `attachment; filename="${att.filename}"`
-			});
+			try {
+				await r2Service.putObj(c, att.key, att.buff, {
+					contentType: att.type,
+					contentDisposition: `attachment; filename="${att.filename}"`
+				});
+				console.log(`附件上传成功: ${att.filename} -> ${att.key}`);
+			} catch (error) {
+				console.error(`附件上传失败: ${att.filename}`, error);
+				// 清理已上传的文件
+				await this.cleanupFailedUploads(c, attList.slice(0, attList.indexOf(att)));
+				throw new Error(`附件上传失败: ${att.filename} - ${error.message}`);
+			}
+		}
+
+		// 所有文件上传成功后，保存数据库记录
+		try {
+			await orm(c).insert(att).values(attDataList).run();
+			console.log(`附件数据库记录保存成功: ${attDataList.length} 条记录`);
+		} catch (error) {
+			console.error('附件数据库记录保存失败:', error);
+			// 删除已上传的文件
+			await this.cleanupFailedUploads(c, attList);
+			throw new Error(`附件数据库保存失败: ${error.message}`);
 		}
 
 	},
@@ -160,6 +211,23 @@ const attService = {
 
 		if (attList.length >= 99) {
 			await this.removeAttByField(c, fieldName, fieldValues);
+		}
+	},
+
+	// 清理失败的上传文件
+	async cleanupFailedUploads(c, attList) {
+		if (!attList || attList.length === 0) return;
+		
+		console.log(`开始清理 ${attList.length} 个失败的上传文件`);
+		for (let att of attList) {
+			if (att.key) {
+				try {
+					await r2Service.delete(c, att.key);
+					console.log(`清理成功: ${att.key}`);
+				} catch (error) {
+					console.error(`清理失败: ${att.key}`, error);
+				}
+			}
 		}
 	},
 
