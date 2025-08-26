@@ -72,25 +72,6 @@
 
 - **File Storage**: [Cloudflare R2](https://developers.cloudflare.com/r2/)
 
-
-## Support
-
-
-<a href="https://doc.skymail.ink/support.html">
-<img width="170px" src="./doc/images/support.png" alt="">
-</a><br><br>
-
-
-**Special Sponsors**
-
-[DartNode](https://dartnode.com)：Providing cloud computing service resource support.
-
-[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
-
 ## License
 
 This project is licensed under the [MIT](LICENSE) license.
-
-## Communication
-
-[Telegram](https://t.me/cloud_mail_tg)

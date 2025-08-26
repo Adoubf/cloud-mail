@@ -79,31 +79,14 @@
 
 - **数据库**：[Cloudflare D1](https://developers.cloudflare.com/d1/)
 
-- **文件存储**：[Cloudflare R2](https://developers.cloudflare.com/r2/)
+- **文件存储**：
+  - [Cloudflare R2](https://developers.cloudflare.com/r2/)
+  - [Minio](https://www.min.io/)
 
-
-## 赞助
-
-
-<a href="https://doc.skymail.ink/support.html" >
-<img width="170px" src="./doc/images/support.png" alt="">
-</a><br><br>
-
-
-**特别赞助商**
-
-[DartNode](https://dartnode.com)：提供云计算服务资源支持
-
-[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
 
 ## 许可证
 
 本项目采用 [MIT](LICENSE) 许可证	
-
-
-## 交流
-
-[Telegram](https://t.me/cloud_mail_tg)
 
 
 
