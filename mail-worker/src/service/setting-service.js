@@ -111,7 +111,13 @@ const settingService = {
 
 		if (background && !background.startsWith('http')) {
 
-			if (!c.env.r2) {
+			// 检查存储配置 - 支持R2和MinIO
+			const storageType = c.env.STORAGE_TYPE || 'r2';
+			const hasStorage = storageType === 'minio' ? 
+				(c.env.MINIO_ENDPOINT && c.env.MINIO_ACCESS_KEY && c.env.MINIO_SECRET_KEY && c.env.MINIO_BUCKET_NAME) :
+				c.env.r2;
+
+			if (!hasStorage) {
 				throw new BizError(t('noOsUpBack'));
 			}
 

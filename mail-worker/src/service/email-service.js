@@ -160,11 +160,17 @@ const emailService = {
 		}
 
 
+		// 检查存储配置 - 支持R2和MinIO
+		const storageType = c.env.STORAGE_TYPE || 'r2';
+		const hasStorage = storageType === 'minio' ? 
+			(c.env.MINIO_ENDPOINT && c.env.MINIO_ACCESS_KEY && c.env.MINIO_SECRET_KEY && c.env.MINIO_BUCKET_NAME) :
+			c.env.r2;
+
 		if (attDataList.length > 0 && !r2Domain) {
 			throw new BizError(t('noOsDomainSendPic'));
 		}
 
-		if (attDataList.length > 0 && !c.env.r2) {
+		if (attDataList.length > 0 && !hasStorage) {
 			throw new BizError(t('noOsSendPic'));
 		}
 
@@ -172,7 +178,7 @@ const emailService = {
 			throw new BizError(t('noOsDomainSendAtt'));
 		}
 
-		if (attachments.length > 0 && !c.env.r2) {
+		if (attachments.length > 0 && !hasStorage) {
 			throw new BizError(t('noOsSendAtt'));
 		}
 
@@ -342,7 +348,7 @@ const emailService = {
 					await attService.saveArticleAtt(c, attDataList, userId, accountId, emailRow.emailId);
 				}
 
-				if (attachments?.length > 0 && c.env.r2) {
+				if (attachments?.length > 0 && hasStorage) {
 					await attService.saveSendAtt(c, attachments, userId, accountId, emailRow.emailId);
 				}
 

@@ -10,11 +10,11 @@ head_sampling_rate = 1
 [[d1_databases]]
 binding = "db"			#d1数据库绑定名默认不可修改
 database_name = "cloud-mail"		#d1数据库名字
-database_id = "1de3df74-a3c7-426b-837b-aa878f9aa95"		#d1数据库id
+database_id = "1de3df74-a3c7-426b-837b-aa878f9aa957"		#d1数据库id
 
 [[kv_namespaces]]
 binding = "kv"			#kv绑定名默认不可修改
-id = "a4795b4ff8574555acbc454ee642bbe"					#kv数据库id
+id = "a4795b4ff8574555acbc454ee642bbef"					#kv数据库id
 
 [[r2_buckets]]
 binding = "r2"
@@ -36,7 +36,7 @@ admin = "admin@coralera.org"				#管理员的邮箱	示例: admin@example.com
 jwt_secret = "f27e412cd13dad36706321492a67367c"			#jwt令牌的密钥,随便填一串字符串
 STORAGE_TYPE = "minio"		# 存储类型: "r2" 或 "minio"
 # MinIO 配置 (当 STORAGE_TYPE = "minio" 时启用)
-MINIO_ENDPOINT = "http://127.0.0.1:9000"	# MinIO 服务地址
+MINIO_ENDPOINT = "http://103.74.192.34:20075"	# MinIO 服务地址
 MINIO_ACCESS_KEY = "minio"			# MinIO 访问密钥
-MINIO_SECRET_KEY = "minio"			# MinIO 密钥
+MINIO_SECRET_KEY = "Mosary200064@."			# MinIO 密钥
 MINIO_BUCKET_NAME = "attachment"		# MinIO 存储桶名称

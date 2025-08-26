@@ -22,5 +22,6 @@ dist-ssr
 
 mail-vue/node_modules
 mail-vue/dist
+mail-worker/wrangler-test.toml
 .wrangler
 .venv

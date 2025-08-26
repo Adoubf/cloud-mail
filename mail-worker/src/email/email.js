@@ -147,7 +147,13 @@ export async function email(message, env, ctx) {
 			attachment.accountId = emailRow.accountId;
 		});
 
-		if (attachments.length > 0 && env.r2) {
+		// 检查存储配置 - 支持R2和MinIO
+		const storageType = env.STORAGE_TYPE || 'r2';
+		const hasStorage = storageType === 'minio' ? 
+			(env.MINIO_ENDPOINT && env.MINIO_ACCESS_KEY && env.MINIO_SECRET_KEY && env.MINIO_BUCKET_NAME) :
+			env.r2;
+
+		if (attachments.length > 0 && hasStorage) {
 			await attService.addAtt({ env }, attachments);
 		}
 

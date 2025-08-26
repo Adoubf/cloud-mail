@@ -145,7 +145,17 @@ const attService = {
 		const existKeys = existAttRows.map(attRow => attRow.key);
 		const delKeyList = keys.filter(key => !existKeys.includes(key));
 		if (delKeyList.length > 0) {
-			await c.env.r2.delete(delKeyList);
+			// 支持R2和MinIO存储的删除
+			const storageType = c.env.STORAGE_TYPE || 'r2';
+			if (storageType === 'minio') {
+				// MinIO 存储下逐个删除文件
+				for (const key of delKeyList) {
+					await r2Service.delete(c, key);
+				}
+			} else {
+				// R2 存储支持批量删除
+				await c.env.r2.delete(delKeyList);
+			}
 		}
 
 		if (attList.length >= 99) {
