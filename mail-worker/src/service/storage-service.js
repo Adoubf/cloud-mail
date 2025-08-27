@@ -1,139 +1,107 @@
-// 基于Fetch API的MinIO客户端实现，兼容Cloudflare Workers
+// 基于aws4fetch的MinIO客户端实现，兼容Cloudflare Workers
 import { AwsClient } from 'aws4fetch';
+
+// S3 key编码函数：保留路径分隔符/，其他字符URL编码
+function encodeS3Key(key) {
+    return key.split('/').map(encodeURIComponent).join('/');
+}
 
 // MinIO客户端实现类
 class MinIOClient {
-    constructor(endpoint, accessKey, secretKey, bucketName) {
-        this.endpoint = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
-        this.accessKey = accessKey;
-        this.secretKey = secretKey;
+    constructor(endpoint, accessKey, secretKey, bucketName, region = 'us-east-1') {
+        this.endpoint = endpoint.replace(/\/+$/, ''); // 去尾斜杠
         this.bucketName = bucketName;
+        this.region = region;
         
         // 创建aws4fetch客户端
         this.awsClient = new AwsClient({
             accessKeyId: accessKey,
             secretAccessKey: secretKey,
-            region: 'us-east-1', // MinIO默认区域
-            service: 's3'
+            service: 's3',
+            region: region
         });
         
         console.log('MinIO客户端配置:', {
             endpoint: this.endpoint,
-            accessKey: this.accessKey,
-            bucketName: this.bucketName
+            accessKey: accessKey,
+            bucketName: this.bucketName,
+            region: this.region
         });
     }
 
-    // 使用Fetch API上传文件
-    async putObject(key, content, contentType = 'application/octet-stream') {
+    // 构建正确编码的URL
+    _buildUrl(key) {
+        return `${this.endpoint}/${this.bucketName}/${encodeS3Key(key)}`;
+    }
+
+    // 使用aws4fetch上传文件
+    async putObject(key, content, contentType = 'application/octet-stream', extraHeaders = {}) {
         try {
             console.log(`MinIO上传开始: ${key}, 大小: ${content.byteLength || content.length} bytes`);
             
-            // 构建URL
-            const url = `${this.endpoint}/${this.bucketName}/${key}`;
-            
-            // 准备内容
+            // 统一二进制体处理
             let body;
-            if (content instanceof ArrayBuffer) {
-                body = new Uint8Array(content);
-            } else if (content instanceof Uint8Array) {
+            if (content instanceof Uint8Array) {
                 body = content;
+            } else if (content instanceof ArrayBuffer) {
+                body = new Uint8Array(content);
             } else if (typeof content === 'string') {
                 body = new TextEncoder().encode(content);
             } else {
-                throw new Error('不支持的内容类型');
+                // 允许Blob/ReadableStream直传
+                body = content;
             }
             
-            // 使用aws4fetch发送签名请求
+            const url = this._buildUrl(key);
             console.log('发送MinIO上传请求:', { url });
+            
+            // 使用aws4fetch发送签名请求（不手动设置Content-Length）
             const response = await this.awsClient.fetch(url, {
                 method: 'PUT',
+                body: body,
                 headers: {
                     'Content-Type': contentType,
-                    'Content-Length': body.length.toString()
-                },
-                body: body
+                    ...extraHeaders // 可传Cache-Control / x-amz-meta-*等
+                }
             });
             
             console.log(`MinIO响应状态: ${response.status}`);
             
             if (!response.ok) {
-                const errorText = await response.text();
-                console.error('MinIO上传失败响应:', {
+                const errorText = await response.text().catch(() => '');
+                const requestId = response.headers.get('x-amz-request-id');
+                const amazonId = response.headers.get('x-amz-id-2');
+                
+                console.error('MinIO上传失败详细信息:', {
                     status: response.status,
                     statusText: response.statusText,
+                    requestId: requestId,
+                    amazonId: amazonId,
                     headers: Object.fromEntries(response.headers.entries()),
-                    body: errorText
+                    body: errorText.slice(0, 300)
                 });
                 
-                // 如果AWS4签名失败，尝试其他认证方式
+                // 针对常见错误提供具体提示
+                let errorHint = '';
                 if (response.status === 403) {
-                    console.log('尝试简单认证方式...');
-                    
-                    // 尝试1: Basic认证
-                    try {
-                        const basicAuth = btoa(`${this.accessKey}:${this.secretKey}`);
-                        const basicResponse = await fetch(url, {
-                            method: 'PUT',
-                            headers: {
-                                'Authorization': `Basic ${basicAuth}`,
-                                'Content-Type': contentType,
-                                'Content-Length': body.length.toString()
-                            },
-                            body: body
-                        });
-                        
-                        if (basicResponse.ok) {
-                            const etag = basicResponse.headers.get('ETag') || 'unknown';
-                            console.log(`MinIO上传成功（Basic认证）: ${key}, ETag: ${etag}`);
-                            return {
-                                ETag: etag,
-                                success: true,
-                                key: key,
-                                size: body.length
-                            };
-                        }
-                    } catch (basicError) {
-                        console.log('Basic认证失败:', basicError.message);
-                    }
-                    
-                    // 尝试2: 无认证（公开存储桶）
-                    try {
-                        const noAuthResponse = await fetch(url, {
-                            method: 'PUT',
-                            headers: {
-                                'Content-Type': contentType,
-                                'Content-Length': body.length.toString()
-                            },
-                            body: body
-                        });
-                        
-                        if (noAuthResponse.ok) {
-                            const etag = noAuthResponse.headers.get('ETag') || 'unknown';
-                            console.log(`MinIO上传成功（无认证）: ${key}, ETag: ${etag}`);
-                            return {
-                                ETag: etag,
-                                success: true,
-                                key: key,
-                                size: body.length
-                            };
-                        }
-                    } catch (noAuthError) {
-                        console.log('无认证上传失败:', noAuthError.message);
-                    }
+                    errorHint = ' (可能原因：权限不足、时间漂移、区域配置不一致)';
+                } else if (response.status === 400) {
+                    errorHint = ' (可能原因：签名格式错误、URL编码问题、请求体格式错误)';
+                } else if (errorText.includes('SignatureDoesNotMatch')) {
+                    errorHint = ' (签名不匹配：检查时间同步、区域设置、密钥正确性)';
                 }
                 
-                throw new Error(`MinIO上传失败: ${response.status} ${response.statusText} - ${errorText}`);
+                throw new Error(`MinIO上传失败: ${response.status} ${response.statusText}${errorHint}; reqId=${requestId}; body=${errorText.slice(0, 100)}`);
             }
             
-            const etag = response.headers.get('ETag') || 'unknown';
-            console.log(`MinIO上传成功（AWS4签名）: ${key}, ETag: ${etag}`);
+            const etag = response.headers.get('ETag');
+            console.log(`MinIO上传成功(AWS4签名): ${key}, ETag: ${etag}`);
             
             return {
-                ETag: etag,
                 success: true,
                 key: key,
-                size: body.length
+                ETag: etag,
+                size: body.length || body.size || 0
             };
             
         } catch (error) {
@@ -144,6 +112,87 @@ class MinIOClient {
             throw new Error(`MinIO上传失败: ${error.message}`);
         }
     }
+
+    // 检查文件是否存在
+    async headObject(key) {
+        try {
+            const url = this._buildUrl(key);
+            
+            const response = await this.awsClient.fetch(url, {
+                method: 'HEAD'
+            });
+            
+            if (response.status === 404) {
+                return null;
+            }
+            
+            if (!response.ok) {
+                const requestId = response.headers.get('x-amz-request-id');
+                throw new Error(`MinIO HEAD请求失败: ${response.status} ${response.statusText}; reqId=${requestId}`);
+            }
+            
+            console.log(`MinIO文件检查成功(AWS4签名): ${key}`);
+            return {
+                ContentLength: Number(response.headers.get('Content-Length') || 0),
+                ContentType: response.headers.get('Content-Type'),
+                ETag: response.headers.get('ETag'),
+                LastModified: response.headers.get('Last-Modified')
+            };
+        } catch (error) {
+            console.error(`MinIO文件检查失败: ${key}`, error);
+            throw error;
+        }
+    }
+
+    // 获取对象
+    async getObject(key) {
+        try {
+            const url = this._buildUrl(key);
+            
+            const response = await this.awsClient.fetch(url, {
+                method: 'GET'
+            });
+            
+            if (!response.ok) {
+                const requestId = response.headers.get('x-amz-request-id');
+                throw new Error(`MinIO GET请求失败: ${response.status} ${response.statusText}; reqId=${requestId}`);
+            }
+            
+            console.log(`MinIO获取文件成功: ${key}`);
+            return {
+                body: response.body, // ReadableStream
+                httpMetadata: {
+                    contentType: response.headers.get('Content-Type') || 'application/octet-stream'
+                }
+            };
+        } catch (error) {
+            console.error(`MinIO获取文件失败: ${key}`, error);
+            throw error;
+        }
+    }
+
+    // 删除对象
+    async deleteObject(key) {
+        try {
+            const url = this._buildUrl(key);
+            
+            const response = await this.awsClient.fetch(url, {
+                method: 'DELETE'
+            });
+            
+            if (!response.ok) {
+                const requestId = response.headers.get('x-amz-request-id');
+                throw new Error(`MinIO DELETE请求失败: ${response.status} ${response.statusText}; reqId=${requestId}`);
+            }
+            
+            console.log(`MinIO删除成功: ${key}`);
+            return { success: true };
+        } catch (error) {
+            console.error(`MinIO删除失败: ${key}`, error);
+            throw error;
+        }
+    }
+}
 
     // 检查文件是否存在
     async headObject(key) {
@@ -266,9 +315,9 @@ const storageService = {
         }
         
         if (storageType === 'minio') {
-            console.log(`使用aws4fetch MinIO客户端上传: ${key}, 大小: ${content.byteLength || content.length}`);
+            console.log(`使用优化的aws4fetch MinIO客户端上传: ${key}, 大小: ${content.byteLength || content.length}`);
             
-            // 使用aws4fetch MinIO客户端上传
+            // 使用优化后的MinIO客户端上传
             const minioClient = new MinIOClient(
                 c.env.MINIO_ENDPOINT,
                 c.env.MINIO_ACCESS_KEY,
@@ -282,7 +331,7 @@ const storageService = {
                 metadata?.contentType || 'application/octet-stream'
             );
             
-            console.log(`aws4fetch MinIO客户端上传成功: ${key}`);
+            console.log(`优化的MinIO客户端上传成功: ${key}`);
             return result;
         } else {
             try {
