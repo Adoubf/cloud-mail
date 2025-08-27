@@ -396,27 +396,27 @@ MinIO 端点: ${TEST_CONFIG.minioTest.endpoint}
         console.log('⚙️  获取系统设置...');
         
         try {
-            const response = await fetch(`${API_BASE_URL}/api/setting/query`, {
+            // 调用websiteConfig API来获取MinIO配置信息
+            const response = await fetch(`${API_BASE_URL}/api/setting/websiteConfig`, {
                 method: 'GET',
                 headers: {
-                    'Authorization': this.token, // 移除 'Bearer ' 前缀
-                    'Content-Type': 'application/json',
+                    'Content-Type': 'application/json', // websiteConfig不需要认证
                 }
             });
 
             const result = await response.json();
             
-            console.log('系统设置响应状态:', response.status);
-            console.log('系统设置响应内容:', JSON.stringify(result, null, 2));
+            console.log('系统配置响应状态:', response.status);
+            console.log('系统配置响应内容:', JSON.stringify(result, null, 2));
             
             if (response.ok && result.data) {
-                console.log('✅ 系统设置信息:');
+                console.log('✅ 系统配置信息:');
                 
                 // 邮件发送设置（注意：根据规范，0表示启用，1表示禁用）
                 const sendEnabled = result.data.send === 0;
                 console.log('- 邮件发送状态:', sendEnabled ? '启用' : '禁用', `(值: ${result.data.send})`);
                 
-                // 存储配置
+                // 存储配置（关键信息）
                 console.log('- 存储类型:', result.data.storageType || '未设置');
                 console.log('- 存储域名:', result.data.storageDomain || '未设置');
                 console.log('- R2域名:', result.data.r2Domain || '未设置');
@@ -424,12 +424,21 @@ MinIO 端点: ${TEST_CONFIG.minioTest.endpoint}
                 // MinIO 特殊检查
                 if (result.data.storageType === 'minio') {
                     console.log('🔍 MinIO 存储配置检查:');
-                    console.log('  - 类型: MinIO');
-                    console.log('  - 预期端点:', TEST_CONFIG.minioTest.endpoint);
-                    console.log('  - 预期存储桶:', TEST_CONFIG.minioTest.bucket);
+                    console.log('  - 类型: MinIO ✅');
                     console.log('  - 存储域名:', result.data.storageDomain);
+                    
+                    // 验证MinIO域名格式
+                    const expectedDomain = `${TEST_CONFIG.minioTest.endpoint}/${TEST_CONFIG.minioTest.bucket}`;
+                    if (result.data.storageDomain === expectedDomain) {
+                        console.log('  - 域名配置: ✅ 正确');
+                    } else {
+                        console.log('  - 域名配置: ⚠️  不匹配');
+                        console.log('    预期:', expectedDomain);
+                        console.log('    实际:', result.data.storageDomain);
+                    }
                 } else {
                     console.log('⚠️  当前存储类型不是MinIO，是:', result.data.storageType);
+                    console.log('   请检查环境变量 STORAGE_TYPE 是否设置为 "minio"');
                 }
                 
                 // 验证邮件发送是否启用
@@ -439,12 +448,12 @@ MinIO 端点: ${TEST_CONFIG.minioTest.endpoint}
                 
                 return result;
             } else {
-                console.log('⚠️  无法获取系统设置, HTTP状态:', response.status);
+                console.log('⚠️  无法获取系统配置, HTTP状态:', response.status);
                 return null;
             }
             
         } catch (error) {
-            console.log('⚠️  获取系统设置失败:', error.message);
+            console.log('⚠️  获取系统配置失败:', error.message);
             return null;
         }
     }

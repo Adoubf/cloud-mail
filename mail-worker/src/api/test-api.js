@@ -1,5 +1,6 @@
 import app from '../hono/hono';
 import result from '../model/result';
+import storageService from '../service/storage-service';
 
 app.get('/test/hello', async (c) => {
 	return c.json(result.ok('hello world'))
@@ -32,4 +33,51 @@ app.get('/test/env', async (c) => {
 	};
 	
 	return c.json(result.ok(envInfo));
+});
+
+// MinIO上传测试接口
+app.post('/test/minio-upload', async (c) => {
+	try {
+		const { filename, content, contentType } = await c.req.json();
+		
+		if (!filename || !content) {
+			return c.json(result.fail('filename 和 content 参数必填'));
+		}
+		
+		// 生成唯一的文件key
+		const key = `test/${Date.now()}-${filename}`;
+		
+		// 将Base64内容转换为ArrayBuffer
+		let buffer;
+		try {
+			// 解码Base64内容
+			const binaryString = atob(content);
+			buffer = new Uint8Array(binaryString.length);
+			for (let i = 0; i < binaryString.length; i++) {
+				buffer[i] = binaryString.charCodeAt(i);
+			}
+		} catch (decodeError) {
+			return c.json(result.fail('Base64解码失败: ' + decodeError.message));
+		}
+		
+		console.log(`开始MinIO测试上传: ${key}, 大小: ${buffer.length} bytes`);
+		
+		// 尝试上传到存储服务
+		const uploadResult = await storageService.putObj(c, key, buffer, {
+			contentType: contentType || 'application/octet-stream'
+		});
+		
+		console.log(`MinIO测试上传成功: ${key}`);
+		
+		return c.json(result.ok({
+			key: key,
+			size: buffer.length,
+			uploadResult: uploadResult,
+			message: 'MinIO上传测试成功'
+		}));
+		
+	} catch (error) {
+		console.error('MinIO上传测试失败:', error);
+		return c.json(result.fail(`MinIO上传测试失败: ${error.message}`));
+	}
 });
