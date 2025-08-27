@@ -382,14 +382,24 @@ const emailService = {
 						}
 					}
 
-					// 处理附件上传 - 这里改为仅记录错误，不中断流程
+					// 处理附件上传 - 记录详细错误信息
 					if (attachments?.length > 0 && hasStorage) {
 						try {
 							await attService.saveSendAtt(c, attachments, userId, accountId, emailRow.emailId);
 							console.log(`附件上传成功: ${attachments.length} 个`);
 						} catch (error) {
 							console.error(`附件上传失败但不影响邮件:`, error);
+							console.error(`附件上传详细错误:`, {
+								errorMessage: error.message,
+								errorStack: error.stack,
+								storageType: c.env.STORAGE_TYPE,
+								minioEndpoint: c.env.MINIO_ENDPOINT,
+								minioBucket: c.env.MINIO_BUCKET_NAME,
+								attachmentsCount: attachments.length,
+								emailId: emailRow.emailId
+							});
 							// 不抛出错误，因为邮件已发送成功，只记录失败
+							// 用户仍然可以通过邮件客户端获取附件
 						}
 					}
 
