@@ -37,32 +37,44 @@ class AwsV4Signer {
     async sign(method, url, headers = {}, payload = '') {
         const urlObj = new URL(url);
         const host = urlObj.host;
-        const path = urlObj.pathname;
+        const path = urlObj.pathname || '/';
         const query = urlObj.search.slice(1); // 移除开头的?
 
-        // 时间戳
+        // 时间戳 - 使用UTC时间
         const now = new Date();
-        const amzDate = now.toISOString().replace(/[:\-]|\..*/g, '');
+        const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
         const dateStamp = amzDate.slice(0, 8);
 
+        // 添加必需的头部
+        const allHeaders = {
+            'host': host,
+            'x-amz-date': amzDate,
+            ...headers
+        };
+
+        // 如果有payload，计算其哈希
+        const payloadHash = await this.sha256(payload);
+        allHeaders['x-amz-content-sha256'] = payloadHash;
+
         // 标准化头部
-        const canonicalHeaders = Object.keys(headers)
-            .map(key => key.toLowerCase())
+        const canonicalHeaders = Object.keys(allHeaders)
+            .map(key => key.toLowerCase().trim())
             .sort()
-            .map(key => `${key}:${headers[Object.keys(headers).find(k => k.toLowerCase() === key)].trim()}\n`)
+            .map(key => {
+                const originalKey = Object.keys(allHeaders).find(k => k.toLowerCase().trim() === key);
+                const value = allHeaders[originalKey];
+                return `${key}:${value.toString().trim()}\n`;
+            })
             .join('');
         
-        const signedHeaders = Object.keys(headers)
-            .map(key => key.toLowerCase())
+        const signedHeaders = Object.keys(allHeaders)
+            .map(key => key.toLowerCase().trim())
             .sort()
             .join(';');
 
-        // 计算payload哈希
-        const payloadHash = await this.sha256(payload);
-
         // 构建规范请求
         const canonicalRequest = [
-            method,
+            method.toUpperCase(),
             path,
             query,
             canonicalHeaders,
@@ -135,19 +147,19 @@ class MinIOClient {
                 throw new Error('不支持的内容类型');
             }
             
-            // 基础头部
+            // 基础头部 - 只包含签名所需的头部
             const headers = {
-                'Content-Type': contentType,
-                'Content-Length': body.length.toString(),
-                'Host': new URL(this.endpoint).host
+                'content-type': contentType,
+                'content-length': body.length.toString()
             };
             
             // 计算签名
             const authHeaders = await this.signer.sign('PUT', url, headers, new TextDecoder().decode(body));
             
-            // 合并所有头部
+            // 合并所有头部 - 使用签名返回的头部名称
             const finalHeaders = {
-                ...headers,
+                'Content-Type': contentType,
+                'Content-Length': body.length.toString(),
                 ...authHeaders
             };
             
@@ -196,12 +208,11 @@ class MinIOClient {
         try {
             const url = `${this.endpoint}/${this.bucketName}/${key}`;
             
-            const headers = {
-                'Host': new URL(this.endpoint).host
-            };
+            // 空头部，让签名方法添加必需的头部
+            const headers = {};
             
             const authHeaders = await this.signer.sign('HEAD', url, headers, '');
-            const finalHeaders = { ...headers, ...authHeaders };
+            const finalHeaders = { ...authHeaders };
             
             const response = await fetch(url, {
                 method: 'HEAD',
@@ -234,12 +245,11 @@ class MinIOClient {
         try {
             const url = `${this.endpoint}/${this.bucketName}/${key}`;
             
-            const headers = {
-                'Host': new URL(this.endpoint).host
-            };
+            // 空头部，让签名方法添加必需的头部
+            const headers = {};
             
             const authHeaders = await this.signer.sign('GET', url, headers, '');
-            const finalHeaders = { ...headers, ...authHeaders };
+            const finalHeaders = { ...authHeaders };
             
             const response = await fetch(url, {
                 method: 'GET',
@@ -268,12 +278,11 @@ class MinIOClient {
         try {
             const url = `${this.endpoint}/${this.bucketName}/${key}`;
             
-            const headers = {
-                'Host': new URL(this.endpoint).host
-            };
+            // 空头部，让签名方法添加必需的头部
+            const headers = {};
             
             const authHeaders = await this.signer.sign('DELETE', url, headers, '');
-            const finalHeaders = { ...headers, ...authHeaders };
+            const finalHeaders = { ...authHeaders };
             
             const response = await fetch(url, {
                 method: 'DELETE',
