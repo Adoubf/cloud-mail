@@ -1,102 +1,230 @@
-// 使用MinIO官方SDK，适用于Cloudflare Workers环境
-import * as Minio from 'minio';
+// 基于Fetch API的MinIO客户端实现，兼容Cloudflare Workers
 
-// MinIO客户端封装类
+// AWS4签名算法实现（使用Web Crypto API）
+class AwsV4Signer {
+    constructor(accessKey, secretKey, region = 'us-east-1', service = 's3') {
+        this.accessKey = accessKey;
+        this.secretKey = secretKey;
+        this.region = region;
+        this.service = service;
+    }
+
+    // 计算SHA256哈希
+    async sha256(message) {
+        const msgUint8 = new TextEncoder().encode(message);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+        return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // 计算HMAC-SHA256
+    async hmacSha256(key, message) {
+        const keyBuffer = key instanceof Uint8Array ? key : new TextEncoder().encode(key);
+        const messageBuffer = new TextEncoder().encode(message);
+        
+        const cryptoKey = await crypto.subtle.importKey(
+            'raw',
+            keyBuffer,
+            { name: 'HMAC', hash: 'SHA-256' },
+            false,
+            ['sign']
+        );
+        
+        const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageBuffer);
+        return new Uint8Array(signature);
+    }
+
+    // 生成AWS4签名
+    async sign(method, url, headers = {}, payload = '') {
+        const urlObj = new URL(url);
+        const host = urlObj.host;
+        const path = urlObj.pathname;
+        const query = urlObj.search.slice(1); // 移除开头的?
+
+        // 时间戳
+        const now = new Date();
+        const amzDate = now.toISOString().replace(/[:\-]|\..*/g, '');
+        const dateStamp = amzDate.slice(0, 8);
+
+        // 标准化头部
+        const canonicalHeaders = Object.keys(headers)
+            .map(key => key.toLowerCase())
+            .sort()
+            .map(key => `${key}:${headers[Object.keys(headers).find(k => k.toLowerCase() === key)].trim()}\n`)
+            .join('');
+        
+        const signedHeaders = Object.keys(headers)
+            .map(key => key.toLowerCase())
+            .sort()
+            .join(';');
+
+        // 计算payload哈希
+        const payloadHash = await this.sha256(payload);
+
+        // 构建规范请求
+        const canonicalRequest = [
+            method,
+            path,
+            query,
+            canonicalHeaders,
+            signedHeaders,
+            payloadHash
+        ].join('\n');
+
+        // 构建字符串以供签名
+        const algorithm = 'AWS4-HMAC-SHA256';
+        const credentialScope = `${dateStamp}/${this.region}/${this.service}/aws4_request`;
+        const stringToSign = [
+            algorithm,
+            amzDate,
+            credentialScope,
+            await this.sha256(canonicalRequest)
+        ].join('\n');
+
+        // 计算签名
+        const kDate = await this.hmacSha256(`AWS4${this.secretKey}`, dateStamp);
+        const kRegion = await this.hmacSha256(kDate, this.region);
+        const kService = await this.hmacSha256(kRegion, this.service);
+        const kSigning = await this.hmacSha256(kService, 'aws4_request');
+        const signature = await this.hmacSha256(kSigning, stringToSign);
+
+        // 生成签名字符串
+        const signatureHex = Array.from(signature).map(b => b.toString(16).padStart(2, '0')).join('');
+        const authorization = `${algorithm} Credential=${this.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signatureHex}`;
+
+        return {
+            'Authorization': authorization,
+            'X-Amz-Date': amzDate,
+            'X-Amz-Content-Sha256': payloadHash
+        };
+    }
+}
+
+// MinIO客户端实现类
 class MinIOClient {
     constructor(endpoint, accessKey, secretKey, bucketName) {
-        // 解析endpoint获取host和port
-        const url = new URL(endpoint);
-        
-        this.minioClient = new Minio.Client({
-            endPoint: url.hostname,
-            port: url.port ? parseInt(url.port) : (url.protocol === 'https:' ? 443 : 80),
-            useSSL: url.protocol === 'https:',
-            accessKey: accessKey,
-            secretKey: secretKey
-        });
-        
+        this.endpoint = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
+        this.accessKey = accessKey;
+        this.secretKey = secretKey;
         this.bucketName = bucketName;
-        this.endpoint = endpoint;
+        this.signer = new AwsV4Signer(accessKey, secretKey);
         
         console.log('MinIO客户端配置:', {
-            endPoint: url.hostname,
-            port: url.port ? parseInt(url.port) : (url.protocol === 'https:' ? 443 : 80),
-            useSSL: url.protocol === 'https:',
-            accessKey: accessKey,
-            bucketName: bucketName
+            endpoint: this.endpoint,
+            accessKey: this.accessKey,
+            bucketName: this.bucketName
         });
     }
 
-    // 使用官方SDK上传文件
+    // 使用Fetch API上传文件
     async putObject(key, content, contentType = 'application/octet-stream') {
         try {
-            console.log(`MinIO SDK上传开始: ${key}, 大小: ${content.byteLength || content.length} bytes`);
+            console.log(`MinIO上传开始: ${key}, 大小: ${content.byteLength || content.length} bytes`);
             
-            // 确保content是Buffer或Stream
-            let buffer;
+            // 构建URL
+            const url = `${this.endpoint}/${this.bucketName}/${key}`;
+            
+            // 准备内容
+            let body;
             if (content instanceof ArrayBuffer) {
-                buffer = Buffer.from(content);
+                body = new Uint8Array(content);
             } else if (content instanceof Uint8Array) {
-                buffer = Buffer.from(content);
-            } else if (Buffer.isBuffer(content)) {
-                buffer = content;
+                body = content;
             } else if (typeof content === 'string') {
-                buffer = Buffer.from(content, 'utf8');
+                body = new TextEncoder().encode(content);
             } else {
                 throw new Error('不支持的内容类型');
             }
             
-            // 设置元数据
-            const metaData = {
-                'Content-Type': contentType
+            // 基础头部
+            const headers = {
+                'Content-Type': contentType,
+                'Content-Length': body.length.toString(),
+                'Host': new URL(this.endpoint).host
             };
             
-            // 使用MinIO SDK上传
-            const result = await this.minioClient.putObject(
-                this.bucketName,
-                key,
-                buffer,
-                metaData
-            );
+            // 计算签名
+            const authHeaders = await this.signer.sign('PUT', url, headers, new TextDecoder().decode(body));
             
-            console.log(`MinIO SDK上传成功: ${key}, ETag: ${result.etag}`);
+            // 合并所有头部
+            const finalHeaders = {
+                ...headers,
+                ...authHeaders
+            };
+            
+            // 发送请求
+            console.log('发送MinIO上传请求:', { url, headers: finalHeaders });
+            const response = await fetch(url, {
+                method: 'PUT',
+                headers: finalHeaders,
+                body: body
+            });
+            
+            console.log(`MinIO响应状态: ${response.status}`);
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('MinIO上传失败响应:', {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: Object.fromEntries(response.headers.entries()),
+                    body: errorText
+                });
+                throw new Error(`MinIO上传失败: ${response.status} ${response.statusText} - ${errorText}`);
+            }
+            
+            const etag = response.headers.get('ETag') || 'unknown';
+            console.log(`MinIO上传成功: ${key}, ETag: ${etag}`);
             
             return {
-                ETag: result.etag,
+                ETag: etag,
                 success: true,
                 key: key,
-                size: buffer.length
+                size: body.length
             };
             
         } catch (error) {
-            console.error(`MinIO SDK上传失败: ${key}`, {
+            console.error(`MinIO上传失败: ${key}`, {
                 message: error.message,
-                code: error.code,
-                statusCode: error.statusCode,
                 stack: error.stack
             });
-            // 提供更详细的错误信息
-            const errorMessage = error.message || error.toString() || 'MinIO上传失败';
-            throw new Error(`MinIO SDK上传失败: ${errorMessage}`);
+            throw new Error(`MinIO上传失败: ${error.message}`);
         }
     }
 
     // 检查文件是否存在
     async headObject(key) {
         try {
-            const stat = await this.minioClient.statObject(this.bucketName, key);
-            console.log(`MinIO SDK文件检查成功: ${key}`);
-            return {
-                ContentLength: stat.size,
-                ContentType: stat.metaData['content-type'],
-                ETag: stat.etag,
-                LastModified: stat.lastModified
+            const url = `${this.endpoint}/${this.bucketName}/${key}`;
+            
+            const headers = {
+                'Host': new URL(this.endpoint).host
             };
-        } catch (error) {
-            if (error.code === 'NotFound' || error.statusCode === 404) {
+            
+            const authHeaders = await this.signer.sign('HEAD', url, headers, '');
+            const finalHeaders = { ...headers, ...authHeaders };
+            
+            const response = await fetch(url, {
+                method: 'HEAD',
+                headers: finalHeaders
+            });
+            
+            if (response.status === 404) {
                 return null;
             }
-            console.error(`MinIO SDK文件检查失败: ${key}`, error);
+            
+            if (!response.ok) {
+                throw new Error(`MinIO HEAD请求失败: ${response.status} ${response.statusText}`);
+            }
+            
+            console.log(`MinIO文件检查成功: ${key}`);
+            return {
+                ContentLength: parseInt(response.headers.get('Content-Length') || '0'),
+                ContentType: response.headers.get('Content-Type'),
+                ETag: response.headers.get('ETag'),
+                LastModified: response.headers.get('Last-Modified')
+            };
+        } catch (error) {
+            console.error(`MinIO文件检查失败: ${key}`, error);
             throw error;
         }
     }
@@ -104,16 +232,33 @@ class MinIOClient {
     // 获取对象
     async getObject(key) {
         try {
-            const stream = await this.minioClient.getObject(this.bucketName, key);
-            console.log(`MinIO SDK获取文件成功: ${key}`);
+            const url = `${this.endpoint}/${this.bucketName}/${key}`;
+            
+            const headers = {
+                'Host': new URL(this.endpoint).host
+            };
+            
+            const authHeaders = await this.signer.sign('GET', url, headers, '');
+            const finalHeaders = { ...headers, ...authHeaders };
+            
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: finalHeaders
+            });
+            
+            if (!response.ok) {
+                throw new Error(`MinIO GET请求失败: ${response.status} ${response.statusText}`);
+            }
+            
+            console.log(`MinIO获取文件成功: ${key}`);
             return {
-                body: stream,
+                body: response.body,
                 httpMetadata: {
-                    contentType: 'application/octet-stream' // MinIO SDK不直接返回metadata，需要单独获取
+                    contentType: response.headers.get('Content-Type') || 'application/octet-stream'
                 }
             };
         } catch (error) {
-            console.error(`MinIO SDK获取文件失败: ${key}`, error);
+            console.error(`MinIO获取文件失败: ${key}`, error);
             throw error;
         }
     }
@@ -121,11 +266,28 @@ class MinIOClient {
     // 删除对象
     async deleteObject(key) {
         try {
-            await this.minioClient.removeObject(this.bucketName, key);
-            console.log(`MinIO SDK删除成功: ${key}`);
+            const url = `${this.endpoint}/${this.bucketName}/${key}`;
+            
+            const headers = {
+                'Host': new URL(this.endpoint).host
+            };
+            
+            const authHeaders = await this.signer.sign('DELETE', url, headers, '');
+            const finalHeaders = { ...headers, ...authHeaders };
+            
+            const response = await fetch(url, {
+                method: 'DELETE',
+                headers: finalHeaders
+            });
+            
+            if (!response.ok) {
+                throw new Error(`MinIO DELETE请求失败: ${response.status} ${response.statusText}`);
+            }
+            
+            console.log(`MinIO删除成功: ${key}`);
             return { success: true };
         } catch (error) {
-            console.error(`MinIO SDK删除失败: ${key}`, error);
+            console.error(`MinIO删除失败: ${key}`, error);
             throw error;
         }
     }
@@ -145,9 +307,9 @@ const storageService = {
         }
         
         if (storageType === 'minio') {
-            console.log(`使用MinIO SDK上传: ${key}, 大小: ${content.byteLength || content.length}`);
+            console.log(`使用自定义MinIO客户端上传: ${key}, 大小: ${content.byteLength || content.length}`);
             
-            // 使用MinIO官方SDK上传
+            // 使用自定义MinIO客户端上传
             const minioClient = new MinIOClient(
                 c.env.MINIO_ENDPOINT,
                 c.env.MINIO_ACCESS_KEY,
@@ -161,7 +323,7 @@ const storageService = {
                 metadata?.contentType || 'application/octet-stream'
             );
             
-            console.log(`MinIO SDK上传成功: ${key}`);
+            console.log(`自定义MinIO客户端上传成功: ${key}`);
             return result;
         } else {
             try {
