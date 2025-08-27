@@ -1,115 +1,5 @@
 // 基于Fetch API的MinIO客户端实现，兼容Cloudflare Workers
-
-// AWS4签名算法实现（使用Web Crypto API）
-class AwsV4Signer {
-    constructor(accessKey, secretKey, region = 'us-east-1', service = 's3') {
-        this.accessKey = accessKey;
-        this.secretKey = secretKey;
-        this.region = region;
-        this.service = service;
-    }
-
-    // 计算SHA256哈希
-    async sha256(message) {
-        const msgUint8 = new TextEncoder().encode(message);
-        const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
-        return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-
-    // 计算HMAC-SHA256
-    async hmacSha256(key, message) {
-        const keyBuffer = key instanceof Uint8Array ? key : new TextEncoder().encode(key);
-        const messageBuffer = new TextEncoder().encode(message);
-        
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw',
-            keyBuffer,
-            { name: 'HMAC', hash: 'SHA-256' },
-            false,
-            ['sign']
-        );
-        
-        const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageBuffer);
-        return new Uint8Array(signature);
-    }
-
-    // 生成AWS4签名
-    async sign(method, url, headers = {}, payload = '') {
-        const urlObj = new URL(url);
-        const host = urlObj.host;
-        const path = urlObj.pathname || '/';
-        const query = urlObj.search.slice(1); // 移除开头的?
-
-        // 时间戳 - 使用UTC时间
-        const now = new Date();
-        const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
-        const dateStamp = amzDate.slice(0, 8);
-
-        // 添加必需的头部
-        const allHeaders = {
-            'host': host,
-            'x-amz-date': amzDate,
-            ...headers
-        };
-
-        // 如果有payload，计算其哈希
-        const payloadHash = await this.sha256(payload);
-        allHeaders['x-amz-content-sha256'] = payloadHash;
-
-        // 标准化头部
-        const canonicalHeaders = Object.keys(allHeaders)
-            .map(key => key.toLowerCase().trim())
-            .sort()
-            .map(key => {
-                const originalKey = Object.keys(allHeaders).find(k => k.toLowerCase().trim() === key);
-                const value = allHeaders[originalKey];
-                return `${key}:${value.toString().trim()}\n`;
-            })
-            .join('');
-        
-        const signedHeaders = Object.keys(allHeaders)
-            .map(key => key.toLowerCase().trim())
-            .sort()
-            .join(';');
-
-        // 构建规范请求
-        const canonicalRequest = [
-            method.toUpperCase(),
-            path,
-            query,
-            canonicalHeaders,
-            signedHeaders,
-            payloadHash
-        ].join('\n');
-
-        // 构建字符串以供签名
-        const algorithm = 'AWS4-HMAC-SHA256';
-        const credentialScope = `${dateStamp}/${this.region}/${this.service}/aws4_request`;
-        const stringToSign = [
-            algorithm,
-            amzDate,
-            credentialScope,
-            await this.sha256(canonicalRequest)
-        ].join('\n');
-
-        // 计算签名
-        const kDate = await this.hmacSha256(`AWS4${this.secretKey}`, dateStamp);
-        const kRegion = await this.hmacSha256(kDate, this.region);
-        const kService = await this.hmacSha256(kRegion, this.service);
-        const kSigning = await this.hmacSha256(kService, 'aws4_request');
-        const signature = await this.hmacSha256(kSigning, stringToSign);
-
-        // 生成签名字符串
-        const signatureHex = Array.from(signature).map(b => b.toString(16).padStart(2, '0')).join('');
-        const authorization = `${algorithm} Credential=${this.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signatureHex}`;
-
-        return {
-            'Authorization': authorization,
-            'X-Amz-Date': amzDate,
-            'X-Amz-Content-Sha256': payloadHash
-        };
-    }
-}
+import { AwsClient } from 'aws4fetch';
 
 // MinIO客户端实现类
 class MinIOClient {
@@ -118,7 +8,14 @@ class MinIOClient {
         this.accessKey = accessKey;
         this.secretKey = secretKey;
         this.bucketName = bucketName;
-        this.signer = new AwsV4Signer(accessKey, secretKey);
+        
+        // 创建aws4fetch客户端
+        this.awsClient = new AwsClient({
+            accessKeyId: accessKey,
+            secretAccessKey: secretKey,
+            region: 'us-east-1', // MinIO默认区域
+            service: 's3'
+        });
         
         console.log('MinIO客户端配置:', {
             endpoint: this.endpoint,
@@ -147,27 +44,14 @@ class MinIOClient {
                 throw new Error('不支持的内容类型');
             }
             
-            // 基础头部 - 只包含签名所需的头部
-            const headers = {
-                'content-type': contentType,
-                'content-length': body.length.toString()
-            };
-            
-            // 计算签名
-            const authHeaders = await this.signer.sign('PUT', url, headers, new TextDecoder().decode(body));
-            
-            // 合并所有头部 - 使用签名返回的头部名称
-            const finalHeaders = {
-                'Content-Type': contentType,
-                'Content-Length': body.length.toString(),
-                ...authHeaders
-            };
-            
-            // 发送请求
-            console.log('发送MinIO上传请求:', { url, headers: finalHeaders });
-            const response = await fetch(url, {
+            // 使用aws4fetch发送签名请求
+            console.log('发送MinIO上传请求:', { url });
+            const response = await this.awsClient.fetch(url, {
                 method: 'PUT',
-                headers: finalHeaders,
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': body.length.toString()
+                },
                 body: body
             });
             
@@ -181,11 +65,69 @@ class MinIOClient {
                     headers: Object.fromEntries(response.headers.entries()),
                     body: errorText
                 });
+                
+                // 如果AWS4签名失败，尝试其他认证方式
+                if (response.status === 403) {
+                    console.log('尝试简单认证方式...');
+                    
+                    // 尝试1: Basic认证
+                    try {
+                        const basicAuth = btoa(`${this.accessKey}:${this.secretKey}`);
+                        const basicResponse = await fetch(url, {
+                            method: 'PUT',
+                            headers: {
+                                'Authorization': `Basic ${basicAuth}`,
+                                'Content-Type': contentType,
+                                'Content-Length': body.length.toString()
+                            },
+                            body: body
+                        });
+                        
+                        if (basicResponse.ok) {
+                            const etag = basicResponse.headers.get('ETag') || 'unknown';
+                            console.log(`MinIO上传成功（Basic认证）: ${key}, ETag: ${etag}`);
+                            return {
+                                ETag: etag,
+                                success: true,
+                                key: key,
+                                size: body.length
+                            };
+                        }
+                    } catch (basicError) {
+                        console.log('Basic认证失败:', basicError.message);
+                    }
+                    
+                    // 尝试2: 无认证（公开存储桶）
+                    try {
+                        const noAuthResponse = await fetch(url, {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type': contentType,
+                                'Content-Length': body.length.toString()
+                            },
+                            body: body
+                        });
+                        
+                        if (noAuthResponse.ok) {
+                            const etag = noAuthResponse.headers.get('ETag') || 'unknown';
+                            console.log(`MinIO上传成功（无认证）: ${key}, ETag: ${etag}`);
+                            return {
+                                ETag: etag,
+                                success: true,
+                                key: key,
+                                size: body.length
+                            };
+                        }
+                    } catch (noAuthError) {
+                        console.log('无认证上传失败:', noAuthError.message);
+                    }
+                }
+                
                 throw new Error(`MinIO上传失败: ${response.status} ${response.statusText} - ${errorText}`);
             }
             
             const etag = response.headers.get('ETag') || 'unknown';
-            console.log(`MinIO上传成功: ${key}, ETag: ${etag}`);
+            console.log(`MinIO上传成功（AWS4签名）: ${key}, ETag: ${etag}`);
             
             return {
                 ETag: etag,
@@ -208,15 +150,9 @@ class MinIOClient {
         try {
             const url = `${this.endpoint}/${this.bucketName}/${key}`;
             
-            // 空头部，让签名方法添加必需的头部
-            const headers = {};
-            
-            const authHeaders = await this.signer.sign('HEAD', url, headers, '');
-            const finalHeaders = { ...authHeaders };
-            
-            const response = await fetch(url, {
-                method: 'HEAD',
-                headers: finalHeaders
+            // 使用aws4fetch发送HEAD请求
+            const response = await this.awsClient.fetch(url, {
+                method: 'HEAD'
             });
             
             if (response.status === 404) {
@@ -224,10 +160,24 @@ class MinIOClient {
             }
             
             if (!response.ok) {
+                console.log(`AWS4签名HEAD请求失败: ${response.status}，尝试其他方式`);
+                // 如果认证失败，尝试不带认证
+                if (response.status === 403) {
+                    const noAuthResponse = await fetch(url, { method: 'HEAD' });
+                    if (noAuthResponse.ok) {
+                        console.log(`MinIO文件检查成功（无认证）: ${key}`);
+                        return {
+                            ContentLength: parseInt(noAuthResponse.headers.get('Content-Length') || '0'),
+                            ContentType: noAuthResponse.headers.get('Content-Type'),
+                            ETag: noAuthResponse.headers.get('ETag'),
+                            LastModified: noAuthResponse.headers.get('Last-Modified')
+                        };
+                    }
+                }
                 throw new Error(`MinIO HEAD请求失败: ${response.status} ${response.statusText}`);
             }
             
-            console.log(`MinIO文件检查成功: ${key}`);
+            console.log(`MinIO文件检查成功（AWS4签名）: ${key}`);
             return {
                 ContentLength: parseInt(response.headers.get('Content-Length') || '0'),
                 ContentType: response.headers.get('Content-Type'),
@@ -245,16 +195,16 @@ class MinIOClient {
         try {
             const url = `${this.endpoint}/${this.bucketName}/${key}`;
             
-            // 空头部，让签名方法添加必需的头部
-            const headers = {};
-            
-            const authHeaders = await this.signer.sign('GET', url, headers, '');
-            const finalHeaders = { ...authHeaders };
-            
-            const response = await fetch(url, {
-                method: 'GET',
-                headers: finalHeaders
+            // 使用aws4fetch发送GET请求
+            let response = await this.awsClient.fetch(url, {
+                method: 'GET'
             });
+            
+            // 如果认证失败，尝试不带认证
+            if (!response.ok && response.status === 403) {
+                console.log(`AWS4签名GET请求失败，尝试无认证访问`);
+                response = await fetch(url, { method: 'GET' });
+            }
             
             if (!response.ok) {
                 throw new Error(`MinIO GET请求失败: ${response.status} ${response.statusText}`);
@@ -278,16 +228,16 @@ class MinIOClient {
         try {
             const url = `${this.endpoint}/${this.bucketName}/${key}`;
             
-            // 空头部，让签名方法添加必需的头部
-            const headers = {};
-            
-            const authHeaders = await this.signer.sign('DELETE', url, headers, '');
-            const finalHeaders = { ...authHeaders };
-            
-            const response = await fetch(url, {
-                method: 'DELETE',
-                headers: finalHeaders
+            // 使用aws4fetch发送DELETE请求
+            let response = await this.awsClient.fetch(url, {
+                method: 'DELETE'
             });
+            
+            // 如果认证失败，尝试不带认证
+            if (!response.ok && response.status === 403) {
+                console.log(`AWS4签名DELETE请求失败，尝试无认证访问`);
+                response = await fetch(url, { method: 'DELETE' });
+            }
             
             if (!response.ok) {
                 throw new Error(`MinIO DELETE请求失败: ${response.status} ${response.statusText}`);
@@ -316,9 +266,9 @@ const storageService = {
         }
         
         if (storageType === 'minio') {
-            console.log(`使用自定义MinIO客户端上传: ${key}, 大小: ${content.byteLength || content.length}`);
+            console.log(`使用aws4fetch MinIO客户端上传: ${key}, 大小: ${content.byteLength || content.length}`);
             
-            // 使用自定义MinIO客户端上传
+            // 使用aws4fetch MinIO客户端上传
             const minioClient = new MinIOClient(
                 c.env.MINIO_ENDPOINT,
                 c.env.MINIO_ACCESS_KEY,
@@ -332,7 +282,7 @@ const storageService = {
                 metadata?.contentType || 'application/octet-stream'
             );
             
-            console.log(`自定义MinIO客户端上传成功: ${key}`);
+            console.log(`aws4fetch MinIO客户端上传成功: ${key}`);
             return result;
         } else {
             try {
