@@ -192,7 +192,6 @@ class MinIOClient {
             throw error;
         }
     }
-}
 
     // 检查文件是否存在
     async headObject(key) {
